@@ -1,0 +1,13 @@
+{
+  "name": "privacyfy-smart-contract",
+  "version": "1.0.0",
+  "description": "Smart contract layer for Privacyfy",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.27.1"
+  }
+}
