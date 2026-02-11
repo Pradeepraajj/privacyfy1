@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Add custom base styles for the gradient background */
+body {
+  @apply bg-gray-900 text-white;
+  background-image: linear-gradient(to bottom right, #000428, #004e92);
+  scroll-behavior: smooth;
+}
