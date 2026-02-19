@@ -6,8 +6,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 require('dotenv').config();
 
-// ✅ IMPORT SERVICE: Assuming services is inside src/services (siblings)
-// If this fails, try: require('../../services/opensslService');
+// ✅ IMPORT SERVICE
+// Ensure opensslService.js is updated to the Synchronous version
 const { verifySignature } = require('../services/opensslService');
 
 // Initialize Pinata SDK
@@ -40,11 +40,14 @@ exports.uploadFile = async (req, res) => {
   try {
     const result = await pinata.pinFileToIPFS(stream, options);
     const { IpfsHash } = result;
-    const newFile = await pool.query(
-      "INSERT INTO files (filename, cid, owner_wallet) VALUES ($1, $2, $3) RETURNING *",
-      [fileName, IpfsHash, walletAddress]
-    );
-    console.log('File uploaded successfully:', newFile.rows[0]);
+    
+    // Optional: Save to DB if you have a 'files' table
+    // const newFile = await pool.query(
+    //   "INSERT INTO files (filename, cid, owner_wallet) VALUES ($1, $2, $3) RETURNING *",
+    //   [fileName, IpfsHash, walletAddress]
+    // );
+    
+    console.log('File uploaded successfully to IPFS:', IpfsHash);
     res.status(201).json({ message: "File uploaded successfully!", cid: IpfsHash });
   } catch (error) {
     console.error("Error during file upload:", error);
@@ -73,7 +76,7 @@ exports.verifyGovtId = async (req, res) => {
     return res.status(400).json({ error: "No document uploaded for verification." });
   }
 
-  // ✅ PATH FIX 1: Go up TWO levels (../../) to reach backend root
+  // Use a temp folder for processing
   const tempDir = path.join(__dirname, '../../temp_uploads');
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
@@ -85,8 +88,8 @@ exports.verifyGovtId = async (req, res) => {
     // Write buffer to disk so Python can read it
     fs.writeFileSync(tempFilePath, req.file.buffer);
 
-    // ✅ PATH FIX 2: Go up TWO levels (../../) to reach ai folder
-    const pythonScriptPath = path.join(__dirname, '../../ai/verify.py');
+    // Point to the 'doc_validator' engine
+    const pythonScriptPath = path.join(__dirname, '../../doc_validator/main.py');
     
     // Debug: Check if script exists
     if (!fs.existsSync(pythonScriptPath)) {
@@ -94,7 +97,13 @@ exports.verifyGovtId = async (req, res) => {
          return res.status(500).json({ error: "Server AI Configuration Error" });
     }
 
-    const pythonProcess = spawn('python', [pythonScriptPath, tempFilePath]);
+    // Pass wallet address as the second argument
+    // Use 'python' or 'python3' depending on your system alias
+    const pythonProcess = spawn('python', [
+        pythonScriptPath, 
+        tempFilePath, 
+        req.body.walletAddress || "0xUnknown"
+    ]);
 
     let dataString = '';
     let errorString = '';
@@ -121,39 +130,77 @@ exports.verifyGovtId = async (req, res) => {
       }
 
       try {
-        const result = JSON.parse(dataString);
-        console.log("🦁 AI Verdict:", result);
+        // --- 🧠 SMART PARSING LOGIC ---
+        // The output contains logs, YOLO download bars, and one valid JSON line.
+        // We split by newlines and look for the JSON object from the bottom up.
+        
+        const lines = dataString.trim().split('\n');
+        let jsonResult = null;
 
-        // --- ✅ NEW: OPENSSL SIGNING LOGIC ---
-        if (result.valid) {
+        // Iterate backwards because the JSON is usually the last thing printed
+        for (let i = lines.length - 1; i >= 0; i--) {
+            try {
+                // Try to parse the line
+                const potentialJson = JSON.parse(lines[i]);
+                
+                // Check if it has our expected fields
+                if (potentialJson.status) { 
+                    jsonResult = potentialJson;
+                    break; // Found it! Stop searching.
+                }
+            } catch (e) {
+                // Not JSON, skip this line
+                continue;
+            }
+        }
+
+        if (!jsonResult) {
+            throw new Error("No valid JSON found in Python output. Raw output: " + dataString);
+        }
+
+        console.log("🦁 AI Verdict:", jsonResult);
+        // -----------------------------
+
+        // --- SIGNING LOGIC ---
+        if (jsonResult.status === "LIKELY_AUTHENTIC" || jsonResult.status === "NEEDS_REVIEW") {
             const payload = {
                 valid: true,
-                docType: result.checks.id_pattern_found || "Government ID",
-                timestamp: Date.now() // Add timestamp to prevent replay attacks
+                docType: jsonResult.document_type,
+                timestamp: Date.now(),
+                risk: jsonResult.risk_level
             };
 
-            // Sign the payload
-            const signature = verifySignature(payload); 
+            // ✅ Synchronous Call (No 'await')
+            // This works because we updated opensslService.js to be synchronous
+            const signature = verifySignature ? verifySignature(payload) : "DEV_SIGNATURE"; 
+            
             console.log("🔐 Generated Signature:", signature);
 
-            // Send Result + Signature
             res.status(200).json({
-                ...result,
+                valid: true,
+                message: jsonResult.status === "LIKELY_AUTHENTIC" ? "Verification Successful" : "Verified (Review Needed)",
+                ...jsonResult,
                 signature: signature
             });
         } else {
-            // If invalid, just send the result (no signature)
-            res.status(200).json(result);
+            // REJECTED
+            res.status(200).json({
+                valid: false,
+                message: "Verification Failed: " + (jsonResult.flags[0] || "Unknown Risk"),
+                ...jsonResult
+            });
         }
-        // -------------------------------------
+        // ---------------------
 
       } catch (parseError) {
-        console.error("JSON Parse Error:", dataString);
+        console.error("JSON Parse Error:", parseError);
+        console.error("Raw Output was:", dataString);
         res.status(500).json({ valid: false, message: "Invalid response from AI engine." });
       }
     });
 
   } catch (error) {
+    // Cleanup on crash
     if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
     console.error("Verification Controller Error:", error);
     res.status(500).json({ error: "Internal Server Error during verification" });

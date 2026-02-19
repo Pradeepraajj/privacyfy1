@@ -3,8 +3,11 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import Navbar from './components/Navbar';
 import Hero from './components/Hero'; 
 import Dashboard from './components/Dashboard';
-import HowItWorks from './components/HowItWorks'; // Ensure this is imported
+import HowItWorks from './components/HowItWorks';
 import Footer from './components/Footer';
+
+// 1. Import the new Anti-Tracker Shield
+import useAntiTracker from './hooks/useAntiTracker';
 
 const AppContent = () => {
   const { isConnected } = useAuth();
@@ -14,15 +17,14 @@ const AppContent = () => {
       <Navbar />
       
       <main className="flex-grow pt-24"> 
-        {/* 1. Main View Switcher */}
+        {/* Main View Switcher */}
         {isConnected ? (
           <Dashboard />
         ) : (
           <Hero />
         )}
 
-        {/* 2. "How It Works" Section - NOW VISIBLE ALWAYS */}
-        {/* We add a margin-top (mt-20) to separate it from the dashboard/hero content */}
+        {/* "How It Works" Section - VISIBLE ALWAYS */}
         <div className="mt-20">
           <HowItWorks />
         </div>
@@ -34,6 +36,9 @@ const AppContent = () => {
 };
 
 function App() {
+  // 🛡️ Activate the anti-fingerprinting shield on global app load
+  useAntiTracker();
+
   return (
     <AuthProvider>
       <AppContent />

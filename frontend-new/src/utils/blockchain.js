@@ -2,7 +2,8 @@ import { ethers } from "ethers";
 import FileRegistryABI from "../abis/FileRegistry.json";
 
 // 🟢 YOUR DEPLOYED ADDRESS (From your terminal)
-const contractAddress = "0x5FbDB2315678afecb367f032d93F642f64180aa3"; 
+// Change this line in your blockchain.js!
+const contractAddress = "0x69564A68058F541357F310B0FA26Fb9b6cF5Abd5";
 
 export const getContract = async () => {
   if (window.ethereum) {
