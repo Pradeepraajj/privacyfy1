@@ -2,33 +2,50 @@
 pragma solidity ^0.8.24;
 
 contract FileRegistry {
-    // 1. Define the structure of a File
+    address public admin;
+
     struct FileData {
         string cid;         // IPFS Content Identifier
         string fileName;    // Original name of the file
-        uint256 timestamp;  // When it was uploaded
+        bytes32 docHash;    // Unique fingerprint of the document
+        bool isVerified;    // AI Verification Status
+        uint256 timestamp;  // When it was anchored
     }
 
-    // 2. Mapping: Wallet Address => List of Files
+    // Mapping: Wallet Address => List of Verified Identity Records
     mapping(address => FileData[]) public userFiles;
 
-    // 3. Event: Logs activity so the frontend knows when an upload happens
-    event FileUploaded(address indexed owner, string cid, string fileName, uint256 timestamp);
+    event FileVerified(address indexed owner, string cid, bytes32 docHash, bool status);
 
-    // 4. Function to add a file (Store Data)
-    function addFile(string memory _cid, string memory _fileName) public {
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Only the AI Backend can verify identities");
+        _;
+    }
+
+    constructor() {
+        admin = msg.sender; // The wallet that deploys this becomes the Admin
+    }
+
+    // Updated function: Now includes docHash and onlyAdmin protection
+    function addVerifiedFile(
+        address _user, 
+        string memory _cid, 
+        string memory _fileName, 
+        bytes32 _docHash
+    ) public onlyAdmin {
         FileData memory newFile = FileData({
             cid: _cid,
             fileName: _fileName,
+            docHash: _docHash,
+            isVerified: true,
             timestamp: block.timestamp
         });
 
-        userFiles[msg.sender].push(newFile);
-        emit FileUploaded(msg.sender, _cid, _fileName, block.timestamp);
+        userFiles[_user].push(newFile);
+        emit FileVerified(_user, _cid, _docHash, true);
     }
 
-    // 5. Function to retrieve files (Read Data)
-    function getFiles() public view returns (FileData[] memory) {
-        return userFiles[msg.sender];
+    function getFiles(address _user) public view returns (FileData[] memory) {
+        return userFiles[_user];
     }
 }
