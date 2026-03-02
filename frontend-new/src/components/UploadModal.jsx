@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, UploadCloud, Loader2, CheckCircle2, ShieldAlert, FileUser, Landmark, ArrowLeft } from 'lucide-react';
+import { X, UploadCloud, Loader2, CheckCircle2, ShieldAlert, FileUser, Landmark, ArrowLeft, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import CryptoJS from 'crypto-js';
 import axios from 'axios';
@@ -13,12 +13,14 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
   const [step, setStep] = useState('idle'); 
   const [statusMsg, setStatusMsg] = useState('');
   const [detectedDocType, setDetectedDocType] = useState('');
+  const [error, setError] = useState(null); // Dedicated error state
 
   const resetModal = () => {
     setUploadType(null);
     setStep('idle');
     setStatusMsg('');
     setDetectedDocType('');
+    setError(null);
   };
 
   const handleClose = () => {
@@ -28,29 +30,32 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
 
   const handleUploadProcess = async (file) => {
     if (!isConnected || !walletAddress) {
-      alert("Please connect your wallet first!");
+      setError("Please connect your wallet first!");
       return;
     }
 
+    setError(null); // Clear previous errors
     let verificationSignature = "Unverified";
     let finalLabel = uploadType === 'personal' ? 'Personal' : 'Govt ID';
     let extractedProfile = null; 
 
     try {
-      // --- STEP 1: AI SCANNING (Govt IDs) ---
+      // --- STEP 1: AI SCANNING (Govt IDs Only) ---
       if (uploadType === 'govt') {
         setStep('scanning');
         setStatusMsg("🦁 AI Analyzing Document...");
         
         const formData = new FormData();
         formData.append('file', file);
-        // FIX: Adding the wallet address so FastAPI doesn't return 400
         formData.append('user_wallet', walletAddress);
+        
+        // Passing dummy profile data since Supabase is ditched
+        formData.append('email', "user@privacyfy.io");
+        formData.append('phone', "0000000000");
 
         try {
-          // Pointing to port 8000 where FastAPI runs
           const response = await axios.post('http://localhost:8000/verify-document', formData, {
-            params: { user_wallet: walletAddress } // Alternative way to pass query params
+            headers: { 'Content-Type': 'multipart/form-data' }
           });
           
           if (!response.data.valid) {
@@ -66,7 +71,7 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
           await new Promise(r => setTimeout(r, 1200));
         } catch (err) {
           console.error("AI Server Error:", err);
-          const errorMsg = err.response?.data?.detail || err.message || "AI Server Offline";
+          const errorMsg = err.response?.data?.detail || err.message || "AI Server Error";
           throw new Error(errorMsg);
         }
       } 
@@ -77,8 +82,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
       
       const fileBuffer = await file.arrayBuffer();
       const wordArray = CryptoJS.lib.WordArray.create(fileBuffer);
-      
-      // Use your secret from .env (Create React App uses REACT_APP_ prefix)
       const secretKey = process.env.REACT_APP_ENCRYPTION_SECRET || "default-secret-key-123";
       const encrypted = CryptoJS.AES.encrypt(wordArray, secretKey).toString();
 
@@ -101,7 +104,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
       });
       pinataData.append('pinataMetadata', metadata);
 
-      // Ensure your .env has REACT_APP_PINATA_API_KEY and REACT_APP_PINATA_SECRET_API_KEY
       const pinataRes = await axios.post("https://api.pinata.cloud/pinning/pinFileToIPFS", pinataData, {
         headers: {
           'Content-Type': `multipart/form-data; boundary=${pinataData._boundary}`,
@@ -115,10 +117,11 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
       // --- STEP 4: BLOCKCHAIN ANCHORING ---
       setStep('signing');
       setStatusMsg(`📝 Signing ${finalLabel} on Sepolia...`);
-      // This calls your smart contract via ethers.js
+      
+      // Potential for Error 4001 (User Rejected) happens here
       const txHash = await saveFileToBlockchain(ipfsHash, file.name);
 
-      // --- STEP 5: UPDATING LOCAL STATES & PROFILE ---
+      // --- STEP 5: UPDATING LOCAL STATES ---
       setStep('success');
       setStatusMsg(`🎉 ${finalLabel} Secured!`);
       
@@ -141,7 +144,7 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
         isVerified: uploadType === 'govt',
         details: extractedProfile ? { 
           confidence_score: 100,
-          flags: ["AI_VERIFIED", "ELA_PASS"] 
+          flags: ["AI_VERIFIED", "ELA_PASS", "D-APP_MODE"] 
         } : null
       };
 
@@ -156,7 +159,15 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
     } catch (error) {
       console.error("Upload Process Error:", error);
       setStep('idle');
-      alert("❌ Error: " + error.message);
+      
+      // --- CLEAN ERROR HANDLING ---
+      if (error.code === 4001 || error.message?.toLowerCase().includes("user rejected")) {
+        setError("Transaction cancelled. Please confirm the request in MetaMask to continue.");
+      } else if (error.message?.includes("Network Error")) {
+        setError("Backend Connection Failed. Please ensure the AI Server is running.");
+      } else {
+        setError(error.message || "An unexpected error occurred during upload.");
+      }
     }
   };
 
@@ -168,7 +179,12 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
   const { getRootProps, getInputProps } = useDropzone({ 
     onDrop, 
     multiple: false,
-    accept: uploadType === 'govt' ? { 'image/*': ['.jpeg', '.jpg', '.png'] } : undefined 
+    accept: uploadType === 'govt' 
+      ? { 
+          'image/*': ['.jpeg', '.jpg', '.png'],
+          'application/pdf': ['.pdf'] 
+        } 
+      : undefined 
   });
 
   if (!isOpen) return null;
@@ -195,29 +211,41 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
             )}
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
               <ShieldAlert className="text-cyan-500 w-5 h-5" /> 
-              PrivacyFy Vault
+              PrivacyFy Vault (Pure dApp)
             </h2>
           </div>
 
           <div className="p-8 flex-1 flex flex-col justify-center">
+            {/* Inline Error Message */}
+            {error && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0 }} 
+                animate={{ opacity: 1, height: 'auto' }}
+                className="mb-6 p-4 bg-red-500/10 border border-red-500/50 rounded-xl flex items-start gap-3 text-red-400 text-sm"
+              >
+                <AlertCircle className="w-5 h-5 shrink-0" />
+                <p>{error}</p>
+              </motion.div>
+            )}
+
             {!uploadType && (
               <div className="space-y-4">
-                <p className="text-gray-400 text-sm text-center mb-4">Select document type to begin secure upload</p>
+                <p className="text-gray-400 text-sm text-center mb-4">Select document type to begin upload</p>
                 <div className="grid grid-cols-2 gap-4">
                   <button onClick={() => setUploadType('personal')} className="group p-6 rounded-xl border border-white/10 bg-white/5 hover:border-cyan-500/50 hover:bg-cyan-500/5 transition-all flex flex-col items-center">
-                    <div className="w-16 h-16 rounded-2xl bg-gray-800 flex items-center justify-center mb-4 group-hover:bg-cyan-500 group-hover:rotate-3 transition-all duration-300">
+                    <div className="w-16 h-16 rounded-2xl bg-gray-800 flex items-center justify-center mb-4 group-hover:bg-cyan-500 transition-all">
                       <FileUser className="w-8 h-8 text-gray-300 group-hover:text-black" />
                     </div>
                     <h3 className="text-white font-bold">Personal</h3>
-                    <p className="text-[10px] text-gray-500 mt-1 uppercase">Simple Encryption</p>
+                    <p className="text-[10px] text-gray-500 mt-1 uppercase">Blockchain Storage</p>
                   </button>
 
                   <button onClick={() => setUploadType('govt')} className="group p-6 rounded-xl border border-white/10 bg-white/5 hover:border-cyan-500/50 hover:bg-cyan-500/5 transition-all flex flex-col items-center">
-                    <div className="w-16 h-16 rounded-2xl bg-gray-800 flex items-center justify-center mb-4 group-hover:bg-cyan-500 group-hover:-rotate-3 transition-all duration-300">
+                    <div className="w-16 h-16 rounded-2xl bg-gray-800 flex items-center justify-center mb-4 group-hover:bg-cyan-500 transition-all">
                       <Landmark className="w-8 h-8 text-gray-300 group-hover:text-black" />
                     </div>
                     <h3 className="text-white font-bold">Govt ID</h3>
-                    <p className="text-[10px] text-cyan-500/70 mt-1 uppercase font-bold">AI Verification</p>
+                    <p className="text-[10px] text-cyan-500/70 mt-1 uppercase font-bold">AI Verify & Anchor</p>
                   </button>
                 </div>
               </div>
@@ -231,33 +259,24 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
                 </div>
                 <p className="text-gray-300 font-medium">Click or Drag File</p>
                 <p className="text-gray-500 text-xs mt-2 italic">
-                  Supported: {uploadType === 'govt' ? 'JPG, PNG (Aadhaar/PAN)' : 'Any File'}
+                  Supported: {uploadType === 'govt' ? 'JPG, PNG, PDF' : 'Any File'}
                 </p>
               </div>
             )}
 
             {step !== 'idle' && step !== 'success' && (
               <div className="text-center py-10">
-                <div className="relative w-20 h-20 mx-auto mb-6">
-                  <Loader2 className="w-20 h-20 text-cyan-500 animate-spin absolute inset-0" />
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="w-10 h-10 bg-cyan-500/10 rounded-full animate-pulse" />
-                  </div>
-                </div>
+                <Loader2 className="w-20 h-20 text-cyan-500 animate-spin mx-auto mb-6" />
                 <h3 className="text-xl font-bold text-white mb-2">{statusMsg}</h3>
-                <p className="text-gray-500 text-sm animate-pulse">This usually takes a few seconds...</p>
+                <p className="text-gray-500 text-sm">Securing data without databases...</p>
               </div>
             )}
 
             {step === 'success' && (
               <div className="text-center py-10">
-                <div className="w-20 h-20 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-6 border border-green-500/30">
-                  <CheckCircle2 className="w-10 h-10 text-green-500" />
-                </div>
+                <CheckCircle2 className="w-20 h-20 text-green-500 mx-auto mb-6" />
                 <h3 className="text-2xl font-bold text-white mb-2">{statusMsg}</h3>
-                <p className="text-gray-400">
-                  Your identity has been updated and the file is secured on-chain.
-                </p>
+                <p className="text-gray-400">Identity updated & anchored on Sepolia.</p>
               </div>
             )}
           </div>

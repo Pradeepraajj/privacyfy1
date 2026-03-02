@@ -31,7 +31,9 @@ def extract_name_from_dl(extracted_lines):
 
             # Final validation: Ensure it's not a stop marker or a date
             if potential_name and not any(stop in potential_name.upper() for stop in stop_markers):
-                if not re.search(r'\d', potential_name): # Names rarely have numbers
+                # Clean name from OCR artifacts (symbols/numbers)
+                potential_name = re.sub(r'[^A-Z\s]', '', potential_name).strip()
+                if len(potential_name) > 3:
                     name = potential_name
                     break
     
@@ -40,18 +42,15 @@ def extract_name_from_dl(extracted_lines):
 def verify_driving_license_text(raw_text):
     """
     Universal Indian DL Parser optimized for Tesseract OCR output.
-    Processes raw text directly to identify State Codes and DL Patterns.
+    Updated to handle spaces and noise common in Tesseract results.
     """
     if not raw_text:
         return {"valid": False, "id_number": "EMPTY_TEXT", "name": ""}
 
     # 1. SPLIT TEXT INTO LINES FOR HEURISTICS
-    # Tesseract output needs cleaning as it often adds noise symbols
+    # We maintain raw lines for name extraction and clean lines for ID matching
     raw_lines_with_spaces = [line.strip().upper() for line in raw_text.split('\n') if line.strip()]
-    extracted_lines = [line.replace(" ", "") for line in raw_lines_with_spaces]
-
-    # print(f"DEBUG TESSERACT EXTRACTED LINES: {extracted_lines}")
-
+    
     # 2. DEFINE STATE CODES & GHOSTS
     state_codes = [
         "AN","AP","AR","AS","BR","CH","CG","DN","DD","DL","GA","GJ",
@@ -59,29 +58,34 @@ def verify_driving_license_text(raw_text):
         "MZ","NL","OD","PY","PB","RJ","SK","TN","TG","TR","UP","UK","WB"
     ]
 
-    # Ghost words/Common boilerplate to ignore if they appear alone
+    # Ghost words to ignore if they appear alone
     ghosts = ["UNION", "INDIA", "DRIVING", "LICENSE", "LICENCE", "DEPT", "GOVT", "TRANSPORT"]
 
     # 3. PATTERN MATCHING PER LINE
-    # Standard format: State Code (2L) + 13 Alpha-Numeric digits (Total 15 chars)
-    universal_pattern = r'([A-Z]{2}[0-9A-Z]{13})'
-    # Fallback for older or varyingly formatted licenses
-    fallback_pattern = r'([A-Z]{2}[0-9A-Z]{10,14})'
+    # The regex now allows for optional spaces or dashes after the State Code 
+    # and District Code to handle Tesseract's "TN70 2024..." format.
+    # Pattern: State(2) + OptionalSpace + Dist(2) + OptionalSpace + Remainder(11)
+    universal_pattern = r'([A-Z]{2}[-\s]?[0-9A-Z]{2}[-\s]?[0-9A-Z]{11})'
+    fallback_pattern = r'([A-Z]{2}[-\s]?[0-9A-Z]{10,14})'
 
     found_id = "NONE"
     is_valid = False
 
-    for line in extracted_lines:
-        # Skip lines that are just ghost words/boilerplate to reduce false positives
-        if any(g in line for g in ghosts) and len(line) < 10:
+    for line in raw_lines_with_spaces:
+        # Step A: Clean line of OCR noise (like ™, |, or random punctuation)
+        clean_line = re.sub(r'[^A-Z0-9\s-]', '', line)
+
+        # Skip boilerplate to reduce false positives
+        if any(g in clean_line for g in ghosts) and len(clean_line) < 10:
             continue
 
-        match = re.search(universal_pattern, line)
+        match = re.search(universal_pattern, clean_line)
         if not match:
-            match = re.search(fallback_pattern, line)
+            match = re.search(fallback_pattern, clean_line)
 
         if match:
-            target = match.group(1)
+            # Step B: Normalize the ID by removing all spaces and dashes
+            target = re.sub(r'[-\s]', '', match.group(1))
             state = target[:2]
             
             # Verify the first two characters are a valid Indian State Code
@@ -89,7 +93,7 @@ def verify_driving_license_text(raw_text):
                 rest = target[2:]
                 
                 # 4. OCR ERROR CORRECTION (Numeric Body)
-                # Corrects common OCR visual misidentifications (e.g., 'O' instead of '0')
+                # Corrects common OCR visual misidentifications
                 corrections = {
                     'O': '0', 'Q': '0', 'Z': '2', 
                     'S': '5', 'I': '1', 'L': '1', 
@@ -101,13 +105,13 @@ def verify_driving_license_text(raw_text):
                 
                 final_id = state + rest
                 
-                # 5. VALIDATION: Ensure the body contains enough digits to be a real DL
+                # 5. VALIDATION: Ensure the body contains enough digits
                 if re.search(r'\d{8,}', final_id):
                     found_id = final_id
                     is_valid = True
                     break
     
-    # 6. NAME EXTRACTION (Using original heuristic)
+    # 6. NAME EXTRACTION
     extracted_name = extract_name_from_dl(raw_lines_with_spaces)
     
     return {
