@@ -25,7 +25,6 @@ from PIL import Image
 from utils.encryption import encrypt_file, generate_key
 
 # --- LOAD ENVIRONMENT VARIABLES ---
-# Locating .env in the parent 'backend' folder
 env_path = Path(__file__).resolve().parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
@@ -50,6 +49,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
+
+# Temporary storage for staged files awaiting transaction confirmation
+STAGED_UPLOADS = {}
 
 # --- INITIALIZE YOLO ---
 try:
@@ -131,17 +133,6 @@ def send_to_blockchain(doc_hash, ipfs_cid, user_wallet, file_name, encryption_ke
     except Exception as e: 
         return f"BLOCKCHAIN_ERROR: {str(e)}"
 
-def generate_blockchain_signature(user_wallet, doc_hash, cid):
-    try:
-        message_hash = Web3.solidity_keccak(
-            ['address', 'string', 'bytes32'], 
-            [Web3.to_checksum_address(user_wallet), cid, bytes.fromhex(doc_hash)]
-        )
-        signed_message = w3.eth.account.sign_message(encode_defunct(primitive=message_hash), private_key=PRIVATE_KEY)
-        return signed_message.signature.hex()
-    except Exception as e: 
-        return f"SIGNING_ERROR: {str(e)}"
-
 # --- DOCUMENT AI LOGIC ---
 def process_document(image_path: str) -> dict:
     response = {
@@ -159,41 +150,32 @@ def process_document(image_path: str) -> dict:
 
         if is_pdf:
             pages = convert_from_path(image_path, dpi=300, poppler_path=POPPLER_PATH)
-            if not pages: 
-                raise ValueError("Poppler extraction failed")
+            if not pages: raise ValueError("Poppler extraction failed")
             img_for_yolo = cv2.cvtColor(np.array(pages[0]), cv2.COLOR_RGB2BGR)
         else:
             img_for_yolo = cv2.imread(image_path)
             pages = [Image.open(image_path)]
 
-        if img_for_yolo is None: 
-            raise ValueError("Failed to load image.")
+        if img_for_yolo is None: raise ValueError("Failed to load image.")
 
         detector = ForgeryDetector()
         response["forensics"]["ela"] = detector.error_level_analysis(image_path) if not is_pdf else 0.5
 
-        # --- STEP 1: Visual Detection (YOLO) ---
+        # YOLO Check
         visual_score = 0
         yolo_detected_type = "UNKNOWN"
         if yolo_model:
             results = yolo_model(img_for_yolo, conf=0.20)
             if len(results[0].boxes) > 0:
                 visual_score = 45
-                response["flags"].append("YOLO: Visual Match")
-                
                 cls_id = int(results[0].boxes.cls[0])
                 cls_name = yolo_model.names[cls_id].upper()
-                
-                if "VOTER" in cls_name:
-                    yolo_detected_type = "VOTER_ID"
-                elif "AADHAR" in cls_name or "ADHAR" in cls_name:
-                    yolo_detected_type = "AADHAAR"
-                elif "PAN" in cls_name:
-                    yolo_detected_type = "PAN"
-                elif "DRIVING" in cls_name:
-                    yolo_detected_type = "DRIVING_LICENSE"
+                if "VOTER" in cls_name: yolo_detected_type = "VOTER_ID"
+                elif "AADHAR" in cls_name or "ADHAR" in cls_name: yolo_detected_type = "AADHAAR"
+                elif "PAN" in cls_name: yolo_detected_type = "PAN"
+                elif "DRIVING" in cls_name: yolo_detected_type = "DRIVING_LICENSE"
 
-        # --- STEP 2: OCR Extraction ---
+        # OCR Extraction
         combined_text = ""
         for page in pages:
             open_cv_image = np.array(page.convert('RGB'))[:, :, ::-1].copy() 
@@ -201,108 +183,134 @@ def process_document(image_path: str) -> dict:
             combined_text += pytesseract.image_to_string(processed_img) + "\n"
 
         upper_text = combined_text.upper()
+        clean_text = upper_text.replace(" ", "").replace("\n", "").replace("*", "").replace("“", "").replace("”", "").replace("'", "")
         
-        # --- STEP 3: STRICT HIERARCHY CLASSIFICATION ---
+        print(f"\n[AI TRACE] OCR Result: {clean_text[:100]}...")
+
+        # Re-ordered Hierarchy
         doc_type = "UNKNOWN"
-        final_id = "OCR Secured"
         rule_score = 0
+        final_id = "N/A"
 
-        # A. Priority 1: Voter ID (Check first - uses specialized regex/keywords)
-        # It won't trigger for Aadhaar because it looks for "Election Commission" or EPIC pattern.
-        voter_check = verify_voter_id_text(combined_text)
-        if voter_check["valid"] or voter_check["id_number"] == "PARTIAL_MATCH":
-            doc_type = "VOTER_ID"
-            final_id = voter_check["id_number"]
-            rule_score = 45 if voter_check["valid"] else 20
-            response["flags"].append("Classification: Voter ID identified by rules")
-
-        # B. Priority 2: PAN Card (Uses very specific keywords like Income Tax)
-        elif "INCOME TAX" in upper_text or "PERMANENT ACCOUNT" in upper_text:
-            doc_type = "PAN"
-            rule_score = 45
-
-        # C. Priority 3: Driving License
-        elif "DRIVING" in upper_text or "LICENSE" in upper_text:
-            doc_type = "DRIVING_LICENSE"
-            rule_score = 45
-
-        # D. Priority 4: Aadhaar (General Keywords LAST)
-        # This prevents Aadhaar from "stealing" classification because it has broad keywords.
-        elif any(k in upper_text for k in ["AADHAAR", "UIDAI", "UNIQUE IDENTIFICATION"]):
+        # 1. Aadhaar
+        if re.search(r'[0-9]{12}', clean_text) or any(k in clean_text for k in ["AADHAAR", "UIDAI", "UNIQUE"]):
             doc_type = "AADHAAR"
-            rule_score = 45
+            rule_score = 50
+            match = re.search(r'[0-9]{12}', clean_text)
+            if match: final_id = match.group(0)
 
-        # --- STEP 4: SYNC LOGIC (Fall back to YOLO if OCR was uncertain) ---
+        # 2. PAN
+        elif any(m in clean_text for m in ["INCOMETAX", "PERMANENT", "ACCOUNT", "ENGRNT", "RARSANT"]):
+            doc_type = "PAN"
+            rule_score = 50
+            match = re.search(r'[A-Z]{5}[0-9]{4}[A-Z]{1}', clean_text)
+            if match: final_id = match.group(0)
+
+        # 3. DL
+        elif re.search(r'[A-Z]{2}[0-9]{2}', clean_text) and any(k in clean_text for k in ["DRIVING", "LICENSE", "DL"]):
+            doc_type = "DRIVING_LICENSE"
+            rule_score = 50
+
+        # 4. Voter ID
+        elif any(k in clean_text for k in ["ELECTION", "EPIC", "VOTER"]):
+            doc_type = "VOTER_ID"
+            rule_score = 50
+
         if doc_type == "UNKNOWN" and yolo_detected_type != "UNKNOWN":
             doc_type = yolo_detected_type
-            rule_score = 15 # Grant partial credit for visual match
-            response["flags"].append(f"Sync: Fallback to YOLO ({yolo_detected_type})")
+            rule_score = 15
 
         response["document_type"] = doc_type
         response["confidence_score"] = visual_score + rule_score
-        
-        # Determine status based on cumulative score
         response["status"] = "LIKELY_AUTHENTIC" if response["confidence_score"] >= 45 else "REJECTED"
-        
-        response["extracted_data"] = {
-            "full_name": "Verified User", 
-            "id_number": final_id, 
-            "uid_type": doc_type,
-            "timestamp": datetime.now().isoformat()
-        }
+        response["extracted_data"] = {"full_name": "Verified User", "id_number": final_id, "uid_type": doc_type, "timestamp": datetime.now().isoformat()}
 
     except Exception as e:
         response["status"] = "ERROR"
         response["flags"].append(str(e))
-    
     return response
 
-# --- API ENDPOINT ---
+# --- API ENDPOINTS ---
+
 @app.post("/verify-document")
 async def verify_document(
     file: UploadFile = File(...), 
-    user_wallet: str = Form(None),
-    email: str = Form(None),
-    phone: str = Form(None)
+    user_wallet: str = Form(None)
 ):
-    if not user_wallet: 
-        raise HTTPException(status_code=400, detail="Wallet address required.")
+    if not user_wallet: raise HTTPException(status_code=400, detail="Wallet address required.")
     
-    temp_path = f"temp_{file.filename}"
-    try:
-        contents = await file.read()
-        doc_hash = hashlib.sha256(contents).hexdigest()
-        with open(temp_path, "wb") as f: 
-            f.write(contents)
-        
-        result = process_document(temp_path)
-        is_valid = result["status"] == "LIKELY_AUTHENTIC"
-        doc_type = result["document_type"]
-
-        final_cid, blockchain_tx, enc_key = "NONE", "NONE", "NONE"
-        
-        if is_valid:
-            key = generate_key()
-            enc_key = key.decode()
-            encrypt_file(temp_path, key)
-            final_cid = upload_to_ipfs(temp_path) or "FAILED"
-            blockchain_tx = send_to_blockchain(doc_hash, final_cid, user_wallet, file.filename, enc_key)
-            print(f"✅ Success! Anchored on Sepolia for {doc_type}.")
+    # Read file content once to generate a deterministic ID
+    contents = await file.read()
+    doc_hash = hashlib.sha256(contents).hexdigest()
+    
+    # Save temporarily to process
+    temp_path = f"staged_{doc_hash}_{file.filename}"
+    with open(temp_path, "wb") as f: f.write(contents)
+    
+    result = process_document(temp_path)
+    
+    if result["status"] == "LIKELY_AUTHENTIC":
+        # STAGE the file in memory/disk. Do NOT upload to IPFS yet.
+        STAGED_UPLOADS[doc_hash] = {
+            "path": temp_path,
+            "filename": file.filename,
+            "wallet": user_wallet,
+            "type": result["document_type"]
+        }
         
         return {
-            "valid": is_valid, 
-            "ipfs_cid": final_cid, 
-            "blockchain_tx": blockchain_tx, 
+            "valid": True,
+            "doc_hash": doc_hash,
+            "details": result,
+            "message": "AI Validation Passed. Awaiting Transaction Confirmation."
+        }
+    
+    # Cleanup if rejected
+    if os.path.exists(temp_path): os.remove(temp_path)
+    return {"valid": False, "details": result}
+
+@app.post("/finalize-upload")
+async def finalize_upload(
+    doc_hash: str = Form(...),
+    tx_hash: str = Form(...) # The hash from the user's MetaMask transaction
+):
+    """
+    Phase 2: Only called after frontend confirms blockchain transaction.
+    This performs the actual Encryption and Pinning.
+    """
+    if doc_hash not in STAGED_UPLOADS:
+        raise HTTPException(status_code=404, detail="Staged file not found or already processed.")
+    
+    staged = STAGED_UPLOADS[doc_hash]
+    file_path = staged["path"]
+    
+    try:
+        # 1. Encrypt the file
+        key = generate_key()
+        enc_key = key.decode()
+        encrypt_file(file_path, key)
+        
+        # 2. Pin to IPFS
+        final_cid = upload_to_ipfs(file_path)
+        
+        if not final_cid:
+            raise HTTPException(status_code=500, detail="IPFS Pinning Failed")
+
+        print(f"🚀 Finalized! File {doc_hash} pinned to CID: {final_cid}")
+        
+        # 3. Cleanup staging
+        if os.path.exists(file_path): os.remove(file_path)
+        del STAGED_UPLOADS[doc_hash]
+        
+        return {
+            "success": True,
+            "ipfs_cid": final_cid,
             "encryption_key": enc_key,
-            "signature": generate_blockchain_signature(user_wallet, doc_hash, final_cid), 
-            "details": result
+            "tx_hash": tx_hash
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(temp_path): 
-            os.remove(temp_path)
 
 if __name__ == "__main__":
     import uvicorn
