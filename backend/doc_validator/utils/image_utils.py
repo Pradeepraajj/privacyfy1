@@ -5,13 +5,23 @@ def preprocess_for_ocr(image):
     """
     Enhanced Image Preprocessing for Tesseract OCR.
     Optimized for Indian ID cards (PAN, Aadhaar, Voter ID).
-    Uses Binary Otsu Thresholding to eliminate background noise.
+    Includes automatic orientation correction for vertical IDs.
     """
     try:
         # 1. Validation: Prevent 'NoneType' or modification errors
         if image is None or not isinstance(image, np.ndarray):
             print("❌ Error: image_utils received an invalid image object.")
             return None
+
+        # --- FIX ORIENTATION (New Addition) ---
+        # Detect if the ID is vertical (h > w). Most Indian IDs should be horizontal.
+        # This fixes the "gibberish" OCR on vertical Voter IDs.
+        h, w = image.shape[:2]
+        if h > w:
+            # Rotate 90 degrees clockwise to standardize layout for Tesseract
+            image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+            print("🔄 Orientation Fix: Detected Vertical ID, rotated 90deg.")
+        # --------------------------------------
 
         # 2. Convert to Grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -46,8 +56,10 @@ def preprocess_for_ocr(image):
         _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         # 7. Morphological Operations
+        # Using a slightly larger kernel (2,2) for separation if characters "bleed"
+        kernel = np.ones((2, 2), np.uint8)
+        
         # Erosion thins out characters to prevent them from touching
-        kernel = np.ones((1, 1), np.uint8)
         processed = cv2.erode(thresh, kernel, iterations=1)
         
         # Dilation to slightly sharpen edges
