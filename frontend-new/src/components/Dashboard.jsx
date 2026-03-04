@@ -6,7 +6,8 @@ import CryptoJS from 'crypto-js';
 import axios from 'axios';
 import { 
   FileText, Download, Trash2, Plus, Search, Loader2, 
-  ShieldAlert, Landmark, FileUser, Filter, ExternalLink, ShieldCheck, AlertTriangle
+  ShieldAlert, Landmark, FileUser, Filter, ExternalLink, ShieldCheck, 
+  AlertTriangle, RefreshCw, History, Wallet
 } from 'lucide-react'; 
 import toast from 'react-hot-toast'; 
 import UploadModal from './UploadModal'; 
@@ -16,9 +17,13 @@ const Dashboard = () => {
   const { walletAddress, isConnected } = useAuth();
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false); // NEW: Sync state
   const [filterType, setFilterType] = useState('all'); 
   const [searchTerm, setSearchTerm] = useState('');
   const [isUploadOpen, setUploadOpen] = useState(false);
+
+  // Helper: Shorten address for UI
+  const shortenAddress = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : "";
 
   const fetchFiles = useCallback(() => {
     if (isConnected && walletAddress) {
@@ -39,53 +44,79 @@ const Dashboard = () => {
     }
   }, [isConnected, walletAddress]);
 
+  /**
+   * NEW: syncVaultFromBlockchain
+   * Pulls the record directly from the Smart Contract
+   */
+  const syncVaultFromBlockchain = async () => {
+    if (!window.ethereum) return toast.error("MetaMask not found!");
+    
+    setIsSyncing(true);
+    const syncToast = toast.loading("Syncing with Sepolia Blockchain...");
+
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+
+      // Call getFiles from your smart contract
+      const onChainFiles = await contract.getFiles(walletAddress);
+
+      const formatted = onChainFiles.map(f => ({
+        cid: f.cid,
+        fileName: f.fileName,
+        date: new Date(Number(f.timestamp) * 1000).toISOString(),
+        isVerified: f.isVerified,
+        docHash: f.docHash,
+        docType: f.isVerified ? 'govt' : 'personal',
+        txHash: "Blockchain Sync" // Transaction history is immutable on-chain
+      }));
+
+      // Update local storage to reflect the chain's truth
+      localStorage.setItem(walletAddress, JSON.stringify(formatted));
+      setFiles(formatted);
+      
+      toast.dismiss(syncToast);
+      toast.success("Vault Synced Successfully!");
+    } catch (error) {
+      console.error("Sync Error:", error);
+      toast.dismiss(syncToast);
+      toast.error("Failed to sync from blockchain.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   useEffect(() => {
     fetchFiles();
   }, [fetchFiles]);
 
   const viewOnBlockchain = (txHash) => {
+    if (txHash === "Blockchain Sync") return toast.info("Data verified directly from contract.");
     window.open(`https://sepolia.etherscan.io/tx/${txHash}`, '_blank');
   };
 
-  /**
-   * UPDATED: handleDownload with Decryption Logic
-   * This replaces the simple window.open which showed encrypted data.
-   */
   const handleDownload = async (cid, fileName) => {
     const loadingToast = toast.loading(`Decrypting ${fileName}...`);
     
     try {
-      // 1. Fetch the encrypted content from IPFS
-      // Using axios to get the raw text data stored in the CID
       const response = await axios.get(`https://gateway.pinata.cloud/ipfs/${cid}`);
       const encryptedData = response.data;
 
-      // 2. Get Secret Key from Environment
       const secretKey = process.env.REACT_APP_ENCRYPTION_SECRET;
-      if (!secretKey) {
-        throw new Error("Decryption key missing in .env file");
-      }
+      if (!secretKey) throw new Error("Decryption key missing in .env file");
 
-      // 3. Decrypt the data
       const bytes = CryptoJS.AES.decrypt(encryptedData, secretKey);
-      
-      // 4. Convert to WordArray then to typed array for Blob creation
-      // We use latin1 to preserve the binary structure of images/PDFs
       const decryptedStr = bytes.toString(CryptoJS.enc.Latin1);
       
-      if (!decryptedStr) {
-        throw new Error("Invalid key or corrupted data.");
-      }
+      if (!decryptedStr) throw new Error("Invalid key or corrupted data.");
 
-      // Convert the decrypted string to an ArrayBuffer
       const n = decryptedStr.length;
       const u8arr = new Uint8Array(n);
       for (let i = 0; i < n; i++) {
         u8arr[i] = decryptedStr.charCodeAt(i);
       }
 
-      // 5. Create a Blob and URL
-      // We try to guess the type based on extension or default to image
       const extension = fileName.split('.').pop().toLowerCase();
       let mimeType = 'image/png';
       if (extension === 'pdf') mimeType = 'application/pdf';
@@ -94,12 +125,9 @@ const Dashboard = () => {
       const blob = new Blob([u8arr], { type: mimeType });
       const fileURL = URL.createObjectURL(blob);
 
-      // 6. Success: Open the decrypted file
       toast.dismiss(loadingToast);
       toast.success("Decryption Successful!");
       window.open(fileURL, '_blank');
-
-      // Cleanup URL after a minute to save memory
       setTimeout(() => URL.revokeObjectURL(fileURL), 60000);
 
     } catch (error) {
@@ -139,25 +167,46 @@ const Dashboard = () => {
 
   return (
     <div className="min-h-screen bg-black text-white font-sans pt-24 pb-20 px-6">
+      {/* MetaMask Inline Warning */}
+      {!window.ethereum && (
+        <div className="fixed top-0 left-0 right-0 z-[100] bg-orange-500/20 border-b border-orange-500/50 p-3 flex items-center justify-center gap-2 text-orange-400 text-sm backdrop-blur-md">
+          <AlertTriangle className="w-4 h-4" />
+          <span>MetaMask not detected. Install extension to anchor documents to blockchain.</span>
+        </div>
+      )}
+
       <div className="max-w-7xl mx-auto">
         
         {/* HEADER & FILTERS */}
         <div className="flex flex-col xl:flex-row justify-between items-end mb-8 border-b border-white/10 pb-6 gap-6">
-          <div>
-            <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-500">
-              My Vault
-            </h1>
-            <p className="text-gray-400 mt-2 font-light flex items-center gap-2">
-              {files.length} Documents Stored 
-              <span className="w-1 h-1 bg-gray-600 rounded-full"></span>
-              <span className="text-cyan-500">
-                {files.filter(f => f.txHash).length} Blockchain Secured
-              </span>
-            </p>
+          <div className="flex items-center gap-6">
+            <div className="p-4 bg-white/5 rounded-2xl border border-white/10 hidden md:block">
+               <Wallet className="w-8 h-8 text-cyan-500" />
+            </div>
+            <div>
+              <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-500">
+                {shortenAddress(walletAddress)}
+              </h1>
+              <p className="text-gray-400 mt-2 font-light flex items-center gap-2">
+                {files.length} Documents Stored 
+                <span className="w-1 h-1 bg-gray-600 rounded-full"></span>
+                <span className="text-cyan-500">
+                  {files.filter(f => f.txHash).length} Blockchain Secured
+                </span>
+              </p>
+            </div>
           </div>
 
           <div className="flex flex-col md:flex-row gap-4 w-full xl:w-auto">
-             <div className="flex bg-[#111] p-1 rounded-xl border border-white/10">
+              <button 
+                onClick={syncVaultFromBlockchain}
+                disabled={isSyncing}
+                className="flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 px-4 py-2.5 rounded-xl text-sm font-medium transition-all"
+              >
+                <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} /> Sync Vault
+              </button>
+
+              <div className="flex bg-[#111] p-1 rounded-xl border border-white/10">
                 {['all', 'govt', 'personal'].map((type) => (
                   <button
                     key={type}
@@ -171,23 +220,23 @@ const Dashboard = () => {
                     {type === 'govt' ? 'Verified IDs' : type}
                   </button>
                 ))}
-             </div>
+              </div>
 
-             <div className="relative flex-1 md:w-64">
+              <div className="relative flex-1 md:w-64">
                 <Search className="absolute left-3 top-3 w-4 h-4 text-gray-500" />
                 <input 
                   type="text" placeholder="Search files..." 
                   value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
                   className="w-full bg-[#111] border border-white/10 rounded-xl py-2.5 pl-10 pr-4 text-sm text-gray-200 focus:outline-none focus:border-cyan-500/50"
                 />
-             </div>
+              </div>
 
-             <button 
-               onClick={() => setUploadOpen(true)}
-               className="bg-cyan-500 hover:bg-cyan-400 text-black px-5 py-2.5 rounded-xl font-bold shadow-[0_0_20px_rgba(34,211,238,0.3)] transition-all active:scale-95 flex items-center gap-2"
-             >
-               <Plus className="w-5 h-5" /> Upload
-             </button>
+              <button 
+                onClick={() => setUploadOpen(true)}
+                className="bg-cyan-500 hover:bg-cyan-400 text-black px-5 py-2.5 rounded-xl font-bold shadow-[0_0_20px_rgba(34,211,238,0.3)] transition-all active:scale-95 flex items-center gap-2"
+              >
+                <Plus className="w-5 h-5" /> Upload
+              </button>
           </div>
         </div>
 
@@ -242,7 +291,6 @@ const Dashboard = () => {
                       </span>
                     </div>
 
-                    {/* AI FORENSIC LOGS */}
                     {file.details && (
                       <div className="mt-4 p-3 bg-black/60 rounded-xl border border-white/5 space-y-2">
                         <div className="flex justify-between items-center text-[10px] uppercase font-bold tracking-widest text-gray-500">
@@ -291,6 +339,47 @@ const Dashboard = () => {
             >
               <Plus className="w-4 h-4" /> Add your first document
             </button>
+          </div>
+        )}
+
+        {/* NEW: TRANSACTION HISTORY SECTION */}
+        {files.length > 0 && (
+          <div className="mt-20">
+            <div className="flex items-center gap-3 mb-6">
+              <History className="text-cyan-500 w-6 h-6" />
+              <h2 className="text-2xl font-bold">Transaction History</h2>
+            </div>
+            <div className="bg-[#0a0a0a] border border-white/5 rounded-2xl overflow-hidden">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-white/5 text-gray-500 uppercase text-[10px] font-bold tracking-widest">
+                  <tr>
+                    <th className="px-6 py-4">Action</th>
+                    <th className="px-6 py-4">Status</th>
+                    <th className="px-6 py-4">Proof</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {files.filter(f => f.txHash).map((file, i) => (
+                    <tr key={i} className="hover:bg-white/5 transition-colors">
+                      <td className="px-6 py-4 text-gray-300 font-medium">Document Anchored: {file.fileName}</td>
+                      <td className="px-6 py-4">
+                        <span className="flex items-center gap-2 text-green-500">
+                          <ShieldCheck className="w-3 h-3" /> Confirmed
+                        </span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <button 
+                          onClick={() => viewOnBlockchain(file.txHash)}
+                          className="text-cyan-500 hover:text-cyan-400 flex items-center gap-1 text-xs"
+                        >
+                          View on Etherscan <ExternalLink className="w-3 h-3" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
