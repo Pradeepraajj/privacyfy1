@@ -39,13 +39,16 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
     try {
       // --- PHASE 1: AI SCANNING & STAGING ---
       setStep('scanning');
-      setStatusMsg("🦁 AI Validating Document...");
+      setStatusMsg(uploadType === 'govt' ? "🦁 AI Validating Document..." : "📂 Staging Personal File...");
       
       const formData = new FormData();
       formData.append('file', file);
       formData.append('user_wallet', walletAddress);
+      
+      // NECESSARY CHANGE: Passing upload_type to the backend
+      formData.append('upload_type', uploadType);
 
-      // Call Phase 1 Backend: AI Verification
+      // Call Phase 1 Backend: AI Verification (Bypassed if upload_type is 'personal')
       const verifyRes = await axios.post('http://localhost:8000/verify-document', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
@@ -59,18 +62,16 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
       finalLabel = verifyRes.data.details?.document_type || finalLabel;
       extractedProfile = verifyRes.data.details?.extracted_data;
       
-      setStatusMsg(`✅ Verified ${finalLabel}. Waiting for Signature...`);
+      setStatusMsg(uploadType === 'govt' ? `✅ Verified ${finalLabel}. Waiting for Signature...` : "✅ File Staged. Waiting for Signature...");
       await new Promise(r => setTimeout(r, 1000));
 
       // --- PHASE 2: BLOCKCHAIN ANCHORING ---
-      // This step triggers MetaMask. If the user cancels here, Step 3 never runs.
       setStep('signing');
       setStatusMsg(`📝 Sign to Anchor ${finalLabel}...`);
       
       const txHash = await saveFileToBlockchain(documentHash, file.name);
 
       // --- PHASE 3: FINALIZE & PIN TO IPFS ---
-      // Only called after transaction success to avoid Pinata storage waste
       setStep('uploading');
       setStatusMsg("☁️ Finalizing Storage & Encryption...");
 
@@ -91,18 +92,16 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
       setStep('success');
       setStatusMsg(`🎉 ${finalLabel} Secured!`);
       
-      // Update local profile if AI extracted name (Self-sovereign Identity)
       if (extractedProfile && extractedProfile.full_name) {
         const profileEntry = {
           name: extractedProfile.full_name,
-          isVerified: true,
+          isVerified: uploadType === 'govt',
           lastUpdated: new Date().toISOString(),
           wallet: walletAddress
         };
         localStorage.setItem(`profile_${walletAddress}`, JSON.stringify(profileEntry));
       }
 
-      // Record entry for the Vault UI
       const newFileEntry = {
         cid: ipfsHash,
         txHash: txHash,
@@ -110,17 +109,16 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
         date: new Date().toISOString(),
         docType: finalLabel,
         isVerified: uploadType === 'govt',
-        encryption_key: encryptionKey, // Stored for client-side decryption later
+        encryption_key: encryptionKey, 
         details: extractedProfile ? { 
-          confidence_score: 100,
-          flags: ["AI_VERIFIED", "ANCHORED_AFTER_TX", "ENCRYPTED"] 
+          confidence_score: uploadType === 'govt' ? 100 : 0,
+          flags: uploadType === 'govt' ? ["AI_VERIFIED", "ANCHORED", "ENCRYPTED"] : ["PERSONAL_VAULT", "ANCHORED", "ENCRYPTED"]
         } : null
       };
 
       const existingFiles = JSON.parse(localStorage.getItem(walletAddress)) || [];
       localStorage.setItem(walletAddress, JSON.stringify([...existingFiles, newFileEntry]));
 
-      // Close modal and refresh dashboard after success
       setTimeout(() => {
         onUploadSuccess(); 
         handleClose(); 
@@ -130,7 +128,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
       console.error("Upload Process Error:", err);
       setStep('idle');
       
-      // Better UX for MetaMask Rejection
       if (err.code === 4001 || err.message?.toLowerCase().includes("user rejected")) {
         setError("Transaction cancelled. IPFS storage was prevented.");
       } else if (err.message?.includes("Network Error")) {
@@ -144,7 +141,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
   const onDrop = useCallback((acceptedFiles) => {
     const file = acceptedFiles[0];
     if (file) handleUploadProcess(file);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uploadType, isConnected, walletAddress]); 
 
   const { getRootProps, getInputProps } = useDropzone({ 
@@ -188,7 +184,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
           </div>
 
           <div className="p-8 flex-1 flex flex-col justify-center">
-            {/* Error Feedback */}
             {error && (
               <motion.div 
                 initial={{ opacity: 0, height: 0 }} 
@@ -200,7 +195,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
               </motion.div>
             )}
 
-            {/* Step: Selection */}
             {!uploadType && (
               <div className="space-y-4">
                 <p className="text-gray-400 text-sm text-center mb-4">Choose document type to begin</p>
@@ -224,7 +218,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
               </div>
             )}
 
-            {/* Step: Dropzone */}
             {uploadType && step === 'idle' && (
               <div {...getRootProps()} className="h-56 border-2 border-dashed border-white/10 rounded-2xl flex flex-col items-center justify-center cursor-pointer hover:border-cyan-500/50 hover:bg-cyan-500/5 transition-all group">
                 <input {...getInputProps()} />
@@ -238,7 +231,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
               </div>
             )}
 
-            {/* Step: Processing/Loading */}
             {step !== 'idle' && step !== 'success' && (
               <div className="text-center py-10">
                 <Loader2 className="w-20 h-20 text-cyan-500 animate-spin mx-auto mb-6" />
@@ -249,7 +241,6 @@ const UploadModal = ({ isOpen, onClose, onUploadSuccess }) => {
               </div>
             )}
 
-            {/* Step: Success UI */}
             {step === 'success' && (
               <div className="text-center py-10">
                 <CheckCircle2 className="w-20 h-20 text-green-500 mx-auto mb-6" />

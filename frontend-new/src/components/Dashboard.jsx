@@ -96,44 +96,73 @@ const Dashboard = () => {
     window.open(`https://sepolia.etherscan.io/tx/${txHash}`, '_blank');
   };
 
+  /**
+   * handleDownload
+   * UPDATED: Handles Base64 + IV extraction to fix broken Government Document previews
+   */
   const handleDownload = async (cid, fileName) => {
     const loadingToast = toast.loading(`Decrypting ${fileName}...`);
     
     try {
+      // 1. Fetch encrypted data from IPFS gateway
       const response = await axios.get(`https://gateway.pinata.cloud/ipfs/${cid}`);
-      const encryptedData = response.data;
+      const base64Data = response.data; // The Base64 string containing IV + Ciphertext
 
-      const secretKey = process.env.REACT_APP_ENCRYPTION_SECRET;
-      if (!secretKey) throw new Error("Decryption key missing in .env file");
+      // 2. The STATIC SECRET KEY (Matches the value in your backend main.py)
+      const secretKey = "privacyfy_demo_secret_2026"; 
 
-      const bytes = CryptoJS.AES.decrypt(encryptedData, secretKey);
-      const decryptedStr = bytes.toString(CryptoJS.enc.Latin1);
-      
-      if (!decryptedStr) throw new Error("Invalid key or corrupted data.");
+      // 3. Parse Base64 string into CryptoJS WordArray
+      const rawData = CryptoJS.enc.Base64.parse(base64Data);
 
-      const n = decryptedStr.length;
-      const u8arr = new Uint8Array(n);
-      for (let i = 0; i < n; i++) {
-        u8arr[i] = decryptedStr.charCodeAt(i);
+      // 4. Extract IV (first 16 bytes / 4 words) and Ciphertext (the rest)
+      const iv = CryptoJS.lib.WordArray.create(rawData.words.slice(0, 4));
+      const ciphertext = CryptoJS.lib.WordArray.create(rawData.words.slice(4));
+
+      // 5. Decrypt using SHA256 hashed secret
+      const key = CryptoJS.SHA256(secretKey);
+      const decrypted = CryptoJS.AES.decrypt(
+        { ciphertext: ciphertext },
+        key,
+        { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+      );
+
+      // 6. Convert WordArray to Uint8Array for valid Image/PDF generation
+      const typedArray = new Uint8Array(decrypted.sigBytes);
+      const words = decrypted.words;
+      for (let i = 0; i < decrypted.sigBytes; i++) {
+        typedArray[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
       }
 
+      if (typedArray.length === 0) throw new Error("Decryption failed. File may be corrupted or key mismatch.");
+
+      // 7. Determine MIME type
       const extension = fileName.split('.').pop().toLowerCase();
       let mimeType = 'image/png';
       if (extension === 'pdf') mimeType = 'application/pdf';
       if (extension === 'jpg' || extension === 'jpeg') mimeType = 'image/jpeg';
 
-      const blob = new Blob([u8arr], { type: mimeType });
+      // 8. Create Blob and trigger download
+      const blob = new Blob([typedArray], { type: mimeType });
       const fileURL = URL.createObjectURL(blob);
 
       toast.dismiss(loadingToast);
-      toast.success("Decryption Successful!");
-      window.open(fileURL, '_blank');
+      toast.success("Success: Document Decrypted!");
+
+      // Use anchor tag to bypass popup blockers and "broken icon" browser rendering
+      const link = document.createElement('a');
+      link.href = fileURL;
+      link.download = `Decrypted_${fileName}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      // Cleanup memory
       setTimeout(() => URL.revokeObjectURL(fileURL), 60000);
 
     } catch (error) {
       console.error("Decryption Error:", error);
       toast.dismiss(loadingToast);
-      toast.error("Decryption failed. Check console for details.");
+      toast.error("Decryption failed. Ensure the file was uploaded with the latest system.");
     }
   };
 
@@ -167,7 +196,6 @@ const Dashboard = () => {
 
   return (
     <div className="min-h-screen bg-black text-white font-sans pt-24 pb-20 px-6">
-      {/* MetaMask Inline Warning */}
       {!window.ethereum && (
         <div className="fixed top-0 left-0 right-0 z-[100] bg-orange-500/20 border-b border-orange-500/50 p-3 flex items-center justify-center gap-2 text-orange-400 text-sm backdrop-blur-md">
           <AlertTriangle className="w-4 h-4" />
@@ -176,8 +204,6 @@ const Dashboard = () => {
       )}
 
       <div className="max-w-7xl mx-auto">
-        
-        {/* HEADER & FILTERS */}
         <div className="flex flex-col xl:flex-row justify-between items-end mb-8 border-b border-white/10 pb-6 gap-6">
           <div className="flex items-center gap-6">
             <div className="p-4 bg-white/5 rounded-2xl border border-white/10 hidden md:block">
@@ -240,7 +266,6 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* GRID VIEW */}
         {isLoading ? (
            <div className="flex justify-center py-20">
              <Loader2 className="w-10 h-10 text-cyan-500 animate-spin" />
@@ -342,7 +367,6 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* NEW: TRANSACTION HISTORY SECTION */}
         {files.length > 0 && (
           <div className="mt-20">
             <div className="flex items-center gap-3 mb-6">
